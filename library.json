@@ -1,0 +1,49 @@
+{
+    "name": "Esp32-RBCamera",
+    "keywords": "ESP32, RBProtocol, RB3201, Robotarna, RobotikaBrno, RoboticsBrno",
+    "description": "Library for using camer in Robotarna Brno",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/RoboticsBrno/Esp32-RBCamera.git"
+    },
+    "authors": [
+        {
+            "name": "Vojtech Bocek",
+            "email": "vbocek@gmail.com",
+            "maintainer": true
+        }
+    ],
+    "version": "0.0.1",
+    "frameworks": [
+        "espidf",
+        "arduino"
+    ],
+    "platforms": "espressif32",
+    "build": {
+        "flags": [
+            "-Isrc/esp32-camera/driver/include",
+            "-Isrc/esp32-camera/conversions/include",
+            "-Isrc/esp32-camera/driver/private_include",
+            "-Isrc/esp32-camera/conversions/private_include",
+            "-Isrc/esp32-camera/sensors/private_include",
+            "-Isrc/esp32-camera/target/private_include",
+            "-Isrc/apriltag/",
+            "-Isrc/rbcamera/",
+            "-DCONFIG_SCCB_CLK_FREQ=100000",
+            "-DCONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=32768",
+            "-DCONFIG_OV2640_SUPPORT=1"
+        ],
+        "includeDir": "src",
+        "srcFilter": [
+            "-<*>",
+            "+<esp32-camera/driver>",
+            "+<esp32-camera/conversions>",
+            "+<esp32-camera/sensors>",
+            "+<esp32-camera/target/esp32>",
+            "+<esp32-camera/target/xclk.c>",
+            "+<apriltag>",
+            "+<rbcamera>"
+        ]
+    }
+}
