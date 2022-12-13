@@ -591,7 +591,7 @@ int quad_segment_agg(apriltag_detector_t *td, zarray_t *cluster, struct line_fit
  * efficiently computed for any contiguous range of indices.
  */
 struct line_fit_pt* compute_lfps(int sz, zarray_t* cluster, image_u8_t* im) {
-    struct line_fit_pt *lfps = calloc(sz, sizeof(struct line_fit_pt));
+    struct line_fit_pt *lfps = heap_caps_calloc(sz, sizeof(struct line_fit_pt), MALLOC_CAP_SPIRAM);
     if(lfps == NULL) {
         printf("Failed to allocate lfps %d\n", sz*sizeof(struct line_fit_pt));
     }

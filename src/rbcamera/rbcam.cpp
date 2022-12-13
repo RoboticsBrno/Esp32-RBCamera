@@ -18,12 +18,12 @@ RbCamera& RbCamera::get() {
 }
 
 
-RbCamera::RbCamera() : m_detector(nullptr) {
+RbCamera::RbCamera() : m_detector(nullptr), m_tag_queue(nullptr), m_april_task(nullptr), m_fb_task(nullptr) {
 
 }
 
 esp_err_t RbCamera::init(const RbCameraConfig& cfg) {
-    if(m_detector != nullptr) {
+    if(m_tag_queue != nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -82,44 +82,117 @@ esp_err_t RbCamera::init(const RbCameraConfig& cfg) {
         return cam_err;
     }
 
-    auto *family = &tag16h5_family;
-    m_detector = apriltag_detector_create();
-
-    // Sets family and how many wrong bits to tolerate
-    apriltag_detector_add_family_bits(m_detector, family, 0);
-
-    m_detector->quad_decimate = 2; // Decimate input image by this factor
-    m_detector->quad_sigma = 0.0;  // Apply low-pass blur to input; negative sharpens
-    m_detector->nthreads = 1;
-    m_detector->debug = false;
-    m_detector->refine_edges = true; // Spend more time trying to align edges of tags
-
+    m_april_quad_decimate = cfg.quad_decimate;
+    m_april_refine_edges = cfg.refine_edges;
+    m_sync_tag_frames = cfg.sync_tag_frames;
     m_tag_queue = xQueueCreate(4, sizeof(RbCameraTagDetected));
 
-    xTaskCreate(processingTask, "rbcam_task", 3584, this, 0, NULL);
+    setAprilTagsEnabled(cfg.enable_apriltag);
+    setSyncTagFrames(cfg.sync_tag_frames);
 
     return ESP_OK;
 }
 
-void RbCamera::processingTask(void *camVoid) {
+void RbCamera::setAprilTagsEnabled(bool enable) {
+    if(enable == (m_detector != nullptr))
+        return;
+
+    if(enable) {
+        auto *family = &tag16h5_family;
+        m_detector = apriltag_detector_create();
+
+        // Sets family and how many wrong bits to tolerate
+        apriltag_detector_add_family_bits(m_detector, family, 0);
+
+        m_detector->quad_decimate = m_april_quad_decimate; // Decimate input image by this factor
+        m_detector->quad_sigma = 0.0;  // Apply low-pass blur to input; negative sharpens
+        m_detector->nthreads = 1;
+        m_detector->debug = false;
+        m_detector->refine_edges = m_april_refine_edges; // Spend more time trying to align edges of tags
+
+        xTaskCreate(aprilTagTask, "rbcam_tag", 3584, this, 0, &m_april_task);
+    } else {
+        xTaskNotify(m_april_task, 0, eNoAction);
+
+        while(true) {
+            auto state = eTaskGetState(m_april_task);
+            if(state == eDeleted || state == eInvalid) {
+                break;
+            }
+            vTaskDelay(5);
+        }
+
+        m_april_task = nullptr;
+        apriltag_detector_destroy(m_detector);
+        m_detector = nullptr;
+
+        setSyncTagFrames(false);
+    }
+}
+
+void RbCamera::setSyncTagFrames(bool enable) {
+    m_sync_tag_frames = enable;
+
+    if(!enable && m_fb_task == nullptr) {
+        xTaskCreate(frameGrabbingTask, "rbcam_frame", 1536, this, 2, &m_fb_task);
+    } else if(enable && m_fb_task != nullptr) {
+        xTaskNotify(m_fb_task, 0, eNoAction);
+        m_fb_task = nullptr;
+    }
+}
+
+void RbCamera::frameGrabbingTask(void *camVoid) {
     auto *self = (RbCamera*)camVoid;
 
-    auto *fb = esp_camera_fb_get();
-    uint8_t *grey_frame =  (uint8_t*)heap_caps_malloc(fb->width*fb->height, MALLOC_CAP_SPIRAM);
-    esp_camera_fb_return(fb);
-
     while(true) {
-        fb = esp_camera_fb_get();
+        auto *fb = esp_camera_fb_get();
         self->m_last_fb.reset(fb, esp_camera_fb_return);
 
+        if(xTaskNotifyWait(0, 0, NULL, pdMS_TO_TICKS(33)) == pdTRUE) {
+            break;
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+void RbCamera::aprilTagTask(void *camVoid) {
+    auto *self = (RbCamera*)camVoid;
+
+    uint8_t *grey_frame = nullptr;
+
+    while(xTaskNotifyWait(0, 0, NULL, 0) != pdTRUE) {
+        std::shared_ptr<camera_fb_t> fb;
+        if(self->m_sync_tag_frames) {
+            fb.reset(esp_camera_fb_get(), esp_camera_fb_return);
+        } else {
+            fb = self->getLastFb();
+        }
+
+        if(!fb) {
+            vTaskDelay(10);
+            continue;
+        }
+
+        if(grey_frame == nullptr) {
+            grey_frame = (uint8_t*)heap_caps_malloc(fb->width*fb->height, MALLOC_CAP_SPIRAM);
+        }
+
         const jpeg_ctx dec_ctx = {
-            .fb = fb,
+            .fb = fb.get(),
             .w = fb->width,
             .h = fb->height,
             .grey_frame = grey_frame,
         };
 
-      /*  esp_jpg_decode(fb->len, JPG_SCALE_NONE, jpgRead, jpgGrescaleWrite, (void*)&dec_ctx);
+        esp_jpg_decode(fb->len, JPG_SCALE_NONE, jpgRead, jpgGrescaleWrite, (void*)&dec_ctx);
+        if(!self->m_sync_tag_frames) {
+            fb.reset();
+        }
+
+        if(xTaskNotifyWait(0, 0, NULL, 0) == pdTRUE) {
+            break;
+        }
+        taskYIELD();
 
         image_u8_t im = {
             .width = (int32_t)dec_ctx.w,
@@ -145,10 +218,17 @@ void RbCamera::processingTask(void *camVoid) {
                 ESP_LOGW("RbCam", "tag queue full, not reading fast enough!");
             }
         }
-        apriltag_detections_destroy(detections);*/
+        apriltag_detections_destroy(detections);
+
+        if(self->m_sync_tag_frames) {
+            self->m_last_fb = fb;
+        }
 
         taskYIELD();
     }
+
+    free(grey_frame);
+    vTaskDelete(NULL);
 }
 
 uint32_t RbCamera::jpgRead(void *arg, size_t index, uint8_t *buf, size_t len) {
@@ -196,13 +276,13 @@ bool RbCamera::jpgGrescaleWrite(void * arg, uint16_t x, uint16_t y, uint16_t w, 
     return true;
 }
 
-static void client_error(int fd, int status, char* msg, char* longmsg) {
-    char buf[256];
-    sprintf(buf, "HTTP/1.1 %d %s\r\n", status, msg);
-    sprintf(buf + strlen(buf),
-        "Content-length: %u\r\n\r\n", strlen(longmsg));
-    sprintf(buf + strlen(buf), "%s", longmsg);
+static void client_error(int fd, int status, const char* msg, const char* longmsg) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "HTTP/1.1 %d %s\r\n"
+            "Content-length: %u\r\n\r\n",
+            status, msg, strlen(longmsg));
     write(fd, buf, strlen(buf));
+    write(fd, longmsg, strlen(longmsg));
 }
 
 void RbCamera::rbWebCallback(const char *request_path, int out_fd) {
@@ -214,11 +294,11 @@ void RbCamera::rbWebCallback(const char *request_path, int out_fd) {
 
     auto fb = RbCamera::get().getLastFb();
     if(!fb) {
-        client_error(out_fd, 500, "Error", "Camera not ready");
+        client_error(out_fd, 503, "Error", "Camera not ready");
         return;
     }
 
-    char buf[256];
+    char buf[96];
     snprintf(buf, sizeof(buf),
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: image/jpeg\r\n"

@@ -3,6 +3,7 @@
 #include <esp_err.h>
 #include <memory>
 #include <freertos/queue.h>
+#include <atomic>
 
 #include "apriltag/apriltag.h"
 
@@ -16,6 +17,12 @@ struct RbCameraConfig {
     uint8_t jpeg_quality;  //0-63 lower number means higher quality
 
     // AprilTags
+    bool enable_apriltag; // Enable whole AprilTag detection
+    // if true, apriltags are processed asynchronously in background.
+    // getLastFb() returns as new frame as possible, likely different
+    // than what AprilTag is processing.
+    // If false, getLastFb is updated only as fast as AprilTag can process.
+    bool sync_tag_frames;
     float quad_decimate; // Decimate input image by this factor
     bool refine_edges; // Spend more time trying to align edges of tags
 };
@@ -60,6 +67,9 @@ public:
         return m_last_fb;
     };
 
+    void setAprilTagsEnabled(bool enable);
+    void setSyncTagFrames(bool enable);
+
     static void rbWebCallback(const char *request_path, int out_fd);
 
 private:
@@ -74,12 +84,19 @@ private:
         uint8_t *grey_frame;
     };
 
-    static void processingTask(void *camVoid);
+    static void frameGrabbingTask(void *camVoid);
+    static void aprilTagTask(void *camVoid);
     static uint32_t jpgRead(void *arg, size_t index, uint8_t *buf, size_t len);
     static bool jpgGrescaleWrite(void * arg, uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t *data);
 
     apriltag_detector_t *m_detector;
     std::shared_ptr<camera_fb_t> m_last_fb;
     QueueHandle_t m_tag_queue;
+
+    TaskHandle_t m_april_task;
+    TaskHandle_t m_fb_task;
+    float m_april_quad_decimate;
+    bool m_april_refine_edges;
+    std::atomic<bool> m_sync_tag_frames;
 };
 };
